@@ -78,6 +78,35 @@ impl TypeSpace {
                 }
             }
 
+            // Simple type enum, no enum values but multiple possible types.
+            SchemaObject {
+                metadata,
+                instance_type: Some(SingleOrVec::Vec(multiple)),
+                enum_values: None,
+                ..
+            } => {
+                if multiple.len() == 1 {
+                    // Should be handled by a InstanceType::Single handler
+                    let new_schema = SchemaObject {
+                        instance_type: Some(SingleOrVec::Single(Box::new(multiple[0]))),
+                        ..schema.clone()
+                    };
+                    self.convert_schema_object(type_name, &new_schema)
+                        .map(|(te, m)| match m {
+                            Some(_) if m == metadata => (te, metadata),
+                            Some(_) => panic!("unexpected metadata value"),
+                            None => (te, &None),
+                        })
+                } else {
+                    self.convert_enum_of_types(
+                        type_name,
+                        &schema.metadata,
+                        &schema.format,
+                        multiple,
+                    )
+                }
+            }
+
             // Strings
             SchemaObject {
                 metadata,
@@ -697,6 +726,7 @@ impl TypeSpace {
             None => ref_name,
         };
         let type_id = self.ref_to_id.get(key).unwrap();
+
         Ok((
             TypeEntryDetails::Reference(type_id.clone()).into(),
             metadata,
@@ -1037,6 +1067,88 @@ impl TypeSpace {
                 instance_types, enum_values
             ),
         }
+    }
+
+    fn convert_enum_of_types<'a>(
+        &mut self,
+        type_name: Name,
+        metadata: &'a Option<Box<Metadata>>,
+        format: &'a Option<String>,
+        enum_types: &[InstanceType],
+    ) -> Result<(TypeEntry, &'a Option<Box<Metadata>>)> {
+        let mut has_null = false;
+
+        if let Some(format) = format {
+            panic!("It's unclear which type format {} should apply to.", format)
+        }
+
+        let variants = enum_types
+            .iter()
+            .flat_map(|value| match value {
+                InstanceType::Null => {
+                    has_null = true;
+                    None
+                }
+                InstanceType::Boolean => {
+                    let type_id = self.assign_type(TypeEntry::new_boolean());
+                    Some(Ok(Variant {
+                        name: "Boolean".to_string(),
+                        rename: None,
+                        description: None,
+                        details: VariantDetails::Tuple(vec![type_id]),
+                    }))
+                }
+                InstanceType::Number => {
+                    let type_id = self.assign_type(TypeEntry::new_float("f64"));
+                    Some(Ok(Variant {
+                        name: "Number".to_string(),
+                        rename: None,
+                        description: None,
+                        details: VariantDetails::Tuple(vec![type_id]),
+                    }))
+                }
+
+                InstanceType::String => {
+                    let type_id = self.assign_type(TypeEntry {
+                        details: TypeEntryDetails::String,
+                        derives: None,
+                    });
+                    Some(Ok(Variant {
+                        name: "String".to_string(),
+                        rename: None,
+                        description: None,
+                        details: VariantDetails::Tuple(vec![type_id]),
+                    }))
+                }
+                InstanceType::Integer => {
+                    let type_id = self.assign_type(TypeEntry::new_integer("i64"));
+                    Some(Ok(Variant {
+                        name: "Integer".to_string(),
+                        rename: None,
+                        description: None,
+                        details: VariantDetails::Tuple(vec![type_id]),
+                    }))
+                }
+                InstanceType::Object | InstanceType::Array => panic!(
+                    "Wasn't expecting complex types for simple type enum {:?}!",
+                    type_name
+                ),
+            })
+            .collect::<Result<Vec<Variant>>>()?;
+        let mut ty = TypeEntryEnum::from_metadata(
+            type_name,
+            metadata,
+            EnumTagType::External,
+            variants,
+            false,
+        )
+        .into();
+
+        if has_null {
+            ty = self.type_to_option(ty);
+        }
+
+        Ok((ty, metadata))
     }
 
     pub(crate) fn convert_option<'a, 'b>(
